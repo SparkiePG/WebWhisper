@@ -72,3 +72,40 @@ export default function Home() {
                 <div>
                   <p className="font-medium text-destructive">Scraping Failed</p>
                   <p className="mt-1 text-sm
+                                    <p className="mt-1 text-sm text-destructive/80">{error}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isLoading && (
+            <div className="animate-fade-in space-y-4">
+              <div className="rounded-xl border border-border bg-card p-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                  <p className="text-sm text-muted-foreground">Scraping in progress...</p>
+                </div>
+                <div className="space-y-3">
+                  <div className="shimmer h-4 w-3/4 rounded" />
+                  <div className="shimmer h-4 w-1/2 rounded" />
+                  <div className="shimmer h-4 w-5/6 rounded" />
+                  <div className="shimmer h-4 w-2/3 rounded" />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {result && !isLoading && (
+            <ResultsPanel result={result} />
+          )}
+
+          {!result && !isLoading && !error && (
+            <FeatureCards />
+          )}
+        </div>
+
+        <Footer />
+      </div>
+    </main>
+  )
+}
