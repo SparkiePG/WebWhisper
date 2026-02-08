@@ -88,4 +88,8 @@ export function FeatureCards() {
             <h3 className="text-sm font-semibold text-foreground mb-1">{feature.title}</h3>
             <p className="text-xs text-muted-foreground leading-relaxed">{feature.description}</p>
           </div>
-        
+                  ))}
+      </div>
+    </div>
+  )
+}
