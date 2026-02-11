@@ -1,155 +1,112 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { scrape } from '@/lib/scraper'
-import { isValidUrl, normalizeUrl } from '@/lib/utils'
-import type { ScrapeOptions } from '@/lib/types'
+import { NextResponse } from 'next/server';
+import * as cheerio from 'cheerio';
+import OpenAI from 'openai';
 
-// Vercel free tier: max 10s execution
-export const maxDuration = 10
-export const dynamic = 'force-dynamic'
+// Initialize OpenAI (You need an API key for "Thinking Power")
+// If no key is found, it will fallback to standard scraping
+const openai = process.env.OPENAI_API_KEY 
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) 
+  : null;
 
-const VALID_MODES = ['text', 'html', 'markdown', 'links', 'images', 'metadata', 'tables', 'structured']
+export const runtime = 'nodejs'; // Use nodejs runtime for Cheerio compatibility
 
-// Simple in-memory rate limiting
-const rateLimit = new Map<string, { count: number; resetTime: number }>()
-const RATE_LIMIT_WINDOW = 60000 // 1 minute
-const RATE_LIMIT_MAX = 15 // 15 requests per minute
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now()
-  const entry = rateLimit.get(ip)
-
-  if (!entry || now > entry.resetTime) {
-    rateLimit.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW })
-    return true
-  }
-
-  if (entry.count >= RATE_LIMIT_MAX) {
-    return false
-  }
-
-  entry.count++
-  return true
-}
-
-// Clean up old rate limit entries periodically
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, value] of rateLimit.entries()) {
-    if (now > value.resetTime) {
-      rateLimit.delete(key)
-    }
-  }
-}, 60000)
-
-export async function POST(request: NextRequest) {
+export async function POST(req: Request) {
   try {
-    // Rate limiting
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-      request.headers.get('x-real-ip') ||
-      'unknown'
+    const body = await req.json();
+    const { url, mode, prompt } = body; // 'prompt' is the user's specific question
 
-    if (!checkRateLimit(ip)) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded. Please wait a moment before trying again.' },
-        { status: 429 }
-      )
+    if (!url) {
+      return NextResponse.json({ error: 'URL is required' }, { status: 400 });
     }
 
-    // Parse body
-    let body: any
-    try {
-      body = await request.json()
-    } catch {
-      return NextResponse.json(
-        { error: 'Invalid JSON in request body' },
-        { status: 400 }
-      )
-    }
-
-    const { url, options } = body as { url?: string; options?: ScrapeOptions }
-
-    // Validate URL
-    if (!url || typeof url !== 'string') {
-      return NextResponse.json(
-        { error: 'URL is required' },
-        { status: 400 }
-      )
-    }
-
-    const normalizedUrl = normalizeUrl(url)
-
-    if (!isValidUrl(normalizedUrl)) {
-      return NextResponse.json(
-        { error: 'Invalid URL. Please provide a valid HTTP or HTTPS URL.' },
-        { status: 400 }
-      )
-    }
-
-    // Block private/internal URLs
-    try {
-      const parsedUrl = new URL(normalizedUrl)
-      const hostname = parsedUrl.hostname.toLowerCase()
-      const blockedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']
-      const blockedPatterns = ['10.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.', '192.168.', '169.254.']
-
-      if (blockedHosts.includes(hostname) || blockedPatterns.some(p => hostname.startsWith(p))) {
-        return NextResponse.json(
-          { error: 'Cannot scrape internal or private network addresses.' },
-          { status: 400 }
-        )
-      }
-    } catch {
-      return NextResponse.json(
-        { error: 'Invalid URL format.' },
-        { status: 400 }
-      )
-    }
-
-    // Validate options
-    const scrapeOptions: ScrapeOptions = {
-      mode: 'text',
-      ...options,
-    }
-
-    if (!VALID_MODES.includes(scrapeOptions.mode)) {
-      return NextResponse.json(
-        { error: `Invalid mode. Must be one of: ${VALID_MODES.join(', ')}` },
-        { status: 400 }
-      )
-    }
-
-    // Perform scraping
-    const result = await scrape(normalizedUrl, scrapeOptions)
-
-    return NextResponse.json(result, {
-      status: 200,
+    // 1. FETCH THE HTML (Mimicking a real browser header to avoid blocks)
+    const response = await fetch(url, {
       headers: {
-        'Cache-Control': 'no-store, max-age=0',
-      },
-    })
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      }
+    });
+
+    if (!response.ok) {
+      return NextResponse.json({ error: `Failed to fetch site: ${response.statusText}` }, { status: response.status });
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    // 2. CLEANUP (Remove junk to save AI tokens and processing time)
+    $('script').remove();
+    $('style').remove();
+    $('svg').remove();
+    $('iframe').remove();
+    const textContent = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 15000); // Limit text for AI context window
+
+    // 3. LOGIC SWITCH: STANDARD SCRAPING VS. THINKING MODE
+    
+    // CASE A: THINKING MODE (AI)
+    if (mode === 'ai' || (prompt && prompt.length > 0)) {
+      if (!openai) {
+        return NextResponse.json({ 
+          error: "To use Thinking Power, you must add OPENAI_API_KEY to your .env file." 
+        }, { status: 500 });
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Fast and cheap for this use case
+        messages: [
+          {
+            role: "system",
+            content: "You are a Web Whisperer. You extract specific data from raw website text based on user intent. Return ONLY valid JSON."
+          },
+          {
+            role: "user",
+            content: `I have scraped a website. Here is the text content: "${textContent}"\n\nUser Request: "${prompt}"\n\nAnalyze the text and return the answer as a JSON object.`
+          }
+        ],
+        response_format: { type: "json_object" }
+      });
+
+      const aiResponse = JSON.parse(completion.choices[0].message.content || "{}");
+      
+      return NextResponse.json({
+        data: aiResponse,
+        meta: {
+          title: $('title').text(),
+          mode: 'ai_analysis'
+        }
+      });
+    }
+
+    // CASE B: STANDARD MODES (Legacy support)
+    let resultData: any = textContent; // Default to text
+
+    if (mode === 'html') resultData = html;
+    if (mode === 'links') {
+      resultData = [];
+      $('a').each((_, el) => {
+        const href = $(el).attr('href');
+        const text = $(el).text().trim();
+        if (href) resultData.push({ text, href });
+      });
+    }
+    if (mode === 'images') {
+      resultData = [];
+      $('img').each((_, el) => {
+        const src = $(el).attr('src');
+        if (src) resultData.push(src);
+      });
+    }
+
+    return NextResponse.json({
+      data: resultData,
+      meta: {
+        title: $('title').text(),
+        description: $('meta[name="description"]').attr('content') || '',
+        mode: mode || 'text'
+      }
+    });
+
   } catch (error: any) {
-    console.error('Scrape error:', error.message)
-
-    const statusCode = error.message?.includes('HTTP ') ? parseInt(error.message.split('HTTP ')[1]) || 500 : 500
-    const isTimeout = error.message?.includes('timed out') || error.name === 'AbortError'
-
-    return NextResponse.json(
-      {
-        error: isTimeout
-          ? 'The request timed out. The target website may be slow or blocking automated requests. Try a different URL.'
-          : error.message || 'An unexpected error occurred while scraping.',
-      },
-      { status: isTimeout ? 504 : Math.min(statusCode, 599) }
-    )
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
-
-// Health check
-export async function GET() {
-  return NextResponse.json({
-    status: 'ok',
-    message: 'WebWhisper Scraper API',
-    modes: VALID_MODES,
-    rateLimit: `${RATE_LIMIT_MAX} requests per minute`,
-  })
 }
